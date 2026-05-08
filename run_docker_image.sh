@@ -31,6 +31,8 @@ Notes:
     are enabled by default.
   - When proxy is enabled, shell, apt, and git proxy settings inside the
     container are updated through managed config instead of duplicated.
+  - DISPLAY is set to :0 on WSL and :1 on native Ubuntu. GUI environment
+    variables inside the container are updated through managed config blocks.
   - Bind mount sources and required WSL/GUI/GPU paths must exist before Docker runs.
   - In WSL, localhost/127.0.0.1 proxy values are rewritten to host.docker.internal.
   - On native Ubuntu, localhost/127.0.0.1 proxy values are kept.
@@ -183,9 +185,41 @@ set -Eeuo pipefail
 proxy_enabled="${RUN_DOCKER_PROXY_ENABLED:-0}"
 proxy="${RUN_DOCKER_PROXY:-}"
 no_proxy_value="${RUN_DOCKER_NO_PROXY:-localhost,127.0.0.1,::1}"
+display_value="${RUN_DOCKER_DISPLAY:-:0}"
+qt_x11_no_mitshm_value="${RUN_DOCKER_QT_X11_NO_MITSHM:-1}"
+wayland_display_value="${RUN_DOCKER_WAYLAND_DISPLAY:-}"
+xdg_runtime_dir_value="${RUN_DOCKER_XDG_RUNTIME_DIR:-}"
+pulse_server_value="${RUN_DOCKER_PULSE_SERVER:-}"
 start_marker="# >>> run_docker_image proxy >>>"
 end_marker="# <<< run_docker_image proxy <<<"
+display_start_marker="# >>> run_docker_image display >>>"
+display_end_marker="# <<< run_docker_image display <<<"
 proxy_vars='http_proxy|https_proxy|ftp_proxy|all_proxy|HTTP_PROXY|HTTPS_PROXY|FTP_PROXY|ALL_PROXY|no_proxy|NO_PROXY'
+display_vars='DISPLAY|QT_X11_NO_MITSHM|WAYLAND_DISPLAY|XDG_RUNTIME_DIR|PULSE_SERVER'
+
+escape_double_quotes() {
+  local value="$1"
+
+  value="${value//\\/\\\\}"
+  value="${value//\"/\\\"}"
+  printf '%s' "$value"
+}
+
+append_shell_export() {
+  local file="$1"
+  local name="$2"
+  local value="$3"
+
+  printf 'export %s="%s"\n' "$name" "$(escape_double_quotes "$value")" >> "$file"
+}
+
+append_environment_value() {
+  local file="$1"
+  local name="$2"
+  local value="$3"
+
+  printf '%s="%s"\n' "$name" "$(escape_double_quotes "$value")" >> "$file"
+}
 
 update_shell_file() {
   local file="$1"
@@ -195,13 +229,30 @@ update_shell_file() {
   touch "$file"
   tmp_file="$(mktemp)"
 
-  awk -v start="$start_marker" -v end="$end_marker" -v vars="$proxy_vars" '
-    $0 == start { skip = 1; next }
-    $0 == end { skip = 0; next }
+  awk -v proxy_start="$start_marker" \
+      -v proxy_end="$end_marker" \
+      -v display_start="$display_start_marker" \
+      -v display_end="$display_end_marker" \
+      -v vars="$proxy_vars|$display_vars" '
+    $0 == proxy_start || $0 == display_start { skip = 1; next }
+    $0 == proxy_end || $0 == display_end { skip = 0; next }
     skip { next }
     $0 ~ "^[[:space:]]*(export[[:space:]]+)?(" vars ")=" { next }
     { print }
   ' "$file" > "$tmp_file"
+
+  cat >> "$tmp_file" <<DISPLAYEOF
+
+$display_start_marker
+DISPLAYEOF
+  append_shell_export "$tmp_file" DISPLAY "$display_value"
+  append_shell_export "$tmp_file" QT_X11_NO_MITSHM "$qt_x11_no_mitshm_value"
+  [[ -n "$wayland_display_value" ]] && append_shell_export "$tmp_file" WAYLAND_DISPLAY "$wayland_display_value"
+  [[ -n "$xdg_runtime_dir_value" ]] && append_shell_export "$tmp_file" XDG_RUNTIME_DIR "$xdg_runtime_dir_value"
+  [[ -n "$pulse_server_value" ]] && append_shell_export "$tmp_file" PULSE_SERVER "$pulse_server_value"
+  cat >> "$tmp_file" <<DISPLAYEOF
+$display_end_marker
+DISPLAYEOF
 
   if [[ "$proxy_enabled" == "1" ]]; then
     cat >> "$tmp_file" <<PROXYEOF
@@ -232,13 +283,30 @@ update_environment_file() {
   touch "$file"
   tmp_file="$(mktemp)"
 
-  awk -v start="$start_marker" -v end="$end_marker" -v vars="$proxy_vars" '
-    $0 == start { skip = 1; next }
-    $0 == end { skip = 0; next }
+  awk -v proxy_start="$start_marker" \
+      -v proxy_end="$end_marker" \
+      -v display_start="$display_start_marker" \
+      -v display_end="$display_end_marker" \
+      -v vars="$proxy_vars|$display_vars" '
+    $0 == proxy_start || $0 == display_start { skip = 1; next }
+    $0 == proxy_end || $0 == display_end { skip = 0; next }
     skip { next }
     $0 ~ "^[[:space:]]*(" vars ")=" { next }
     { print }
   ' "$file" > "$tmp_file"
+
+  cat >> "$tmp_file" <<DISPLAYEOF
+
+$display_start_marker
+DISPLAYEOF
+  append_environment_value "$tmp_file" DISPLAY "$display_value"
+  append_environment_value "$tmp_file" QT_X11_NO_MITSHM "$qt_x11_no_mitshm_value"
+  [[ -n "$wayland_display_value" ]] && append_environment_value "$tmp_file" WAYLAND_DISPLAY "$wayland_display_value"
+  [[ -n "$xdg_runtime_dir_value" ]] && append_environment_value "$tmp_file" XDG_RUNTIME_DIR "$xdg_runtime_dir_value"
+  [[ -n "$pulse_server_value" ]] && append_environment_value "$tmp_file" PULSE_SERVER "$pulse_server_value"
+  cat >> "$tmp_file" <<DISPLAYEOF
+$display_end_marker
+DISPLAYEOF
 
   if [[ "$proxy_enabled" == "1" ]]; then
     cat >> "$tmp_file" <<PROXYEOF
@@ -263,14 +331,20 @@ PROXYEOF
 }
 
 update_profile_script() {
-  local file="/etc/profile.d/run_docker_image_proxy.sh"
+  local file="/etc/profile.d/run_docker_image_env.sh"
+  local old_file="/etc/profile.d/run_docker_image_proxy.sh"
 
-  if [[ "$proxy_enabled" != "1" ]]; then
-    rm -f "$file"
-    return
-  fi
+  rm -f "$old_file"
 
-  cat > "$file" <<PROXYEOF
+  : > "$file"
+  append_shell_export "$file" DISPLAY "$display_value"
+  append_shell_export "$file" QT_X11_NO_MITSHM "$qt_x11_no_mitshm_value"
+  [[ -n "$wayland_display_value" ]] && append_shell_export "$file" WAYLAND_DISPLAY "$wayland_display_value"
+  [[ -n "$xdg_runtime_dir_value" ]] && append_shell_export "$file" XDG_RUNTIME_DIR "$xdg_runtime_dir_value"
+  [[ -n "$pulse_server_value" ]] && append_shell_export "$file" PULSE_SERVER "$pulse_server_value"
+
+  if [[ "$proxy_enabled" == "1" ]]; then
+    cat >> "$file" <<PROXYEOF
 export http_proxy="$proxy"
 export https_proxy="$proxy"
 export ftp_proxy="$proxy"
@@ -282,6 +356,7 @@ export ALL_PROXY="\$all_proxy"
 export no_proxy="$no_proxy_value"
 export NO_PROXY="\$no_proxy"
 PROXYEOF
+  fi
 }
 
 update_apt_proxy() {
@@ -326,6 +401,12 @@ update_profile_script
 update_apt_proxy
 update_git_proxy
 
+export DISPLAY="$display_value"
+export QT_X11_NO_MITSHM="$qt_x11_no_mitshm_value"
+[[ -n "$wayland_display_value" ]] && export WAYLAND_DISPLAY="$wayland_display_value"
+[[ -n "$xdg_runtime_dir_value" ]] && export XDG_RUNTIME_DIR="$xdg_runtime_dir_value"
+[[ -n "$pulse_server_value" ]] && export PULSE_SERVER="$pulse_server_value"
+
 if [[ "$proxy_enabled" == "1" ]]; then
   export http_proxy="$proxy"
   export https_proxy="$proxy"
@@ -350,10 +431,21 @@ proxy_exec_env_args() {
   local -n out_args="$1"
 
   out_args+=(
+    -e "RUN_DOCKER_DISPLAY=$DISPLAY_VALUE"
+    -e "RUN_DOCKER_QT_X11_NO_MITSHM=$QT_X11_NO_MITSHM_VALUE"
+    -e "RUN_DOCKER_WAYLAND_DISPLAY=$WAYLAND_DISPLAY_VALUE"
+    -e "RUN_DOCKER_XDG_RUNTIME_DIR=$XDG_RUNTIME_DIR_VALUE"
+    -e "RUN_DOCKER_PULSE_SERVER=$PULSE_SERVER_VALUE"
+    -e "DISPLAY=$DISPLAY_VALUE"
+    -e "QT_X11_NO_MITSHM=$QT_X11_NO_MITSHM_VALUE"
     -e "RUN_DOCKER_PROXY_ENABLED=$PROXY_ENABLED"
     -e "RUN_DOCKER_PROXY=$PROXY_VALUE"
     -e "RUN_DOCKER_NO_PROXY=$NO_PROXY_VALUE"
   )
+
+  [[ -n "$WAYLAND_DISPLAY_VALUE" ]] && out_args+=(-e "WAYLAND_DISPLAY=$WAYLAND_DISPLAY_VALUE")
+  [[ -n "$XDG_RUNTIME_DIR_VALUE" ]] && out_args+=(-e "XDG_RUNTIME_DIR=$XDG_RUNTIME_DIR_VALUE")
+  [[ -n "$PULSE_SERVER_VALUE" ]] && out_args+=(-e "PULSE_SERVER=$PULSE_SERVER_VALUE")
 
   if [[ "$PROXY_ENABLED" -eq 1 ]]; then
     out_args+=(
@@ -397,6 +489,11 @@ PROXY_MODE="7897"
 PROXY_ENABLED=0
 PROXY_VALUE=""
 NO_PROXY_VALUE="localhost,127.0.0.1,::1,host.docker.internal"
+DISPLAY_VALUE=""
+QT_X11_NO_MITSHM_VALUE="1"
+WAYLAND_DISPLAY_VALUE=""
+XDG_RUNTIME_DIR_VALUE=""
+PULSE_SERVER_VALUE=""
 USE_GPU=1
 USE_PRIVILEGED=1
 REPLACE=0
@@ -501,6 +598,15 @@ for volume in "${EXTRA_VOLUMES[@]}"; do
 done
 EXTRA_VOLUMES=("${NORMALIZED_EXTRA_VOLUMES[@]}")
 
+if is_wsl; then
+  DISPLAY_VALUE=":0"
+  WAYLAND_DISPLAY_VALUE="${WAYLAND_DISPLAY:-wayland-0}"
+  XDG_RUNTIME_DIR_VALUE="/mnt/wslg/runtime-dir"
+  PULSE_SERVER_VALUE="${PULSE_SERVER:-}"
+else
+  DISPLAY_VALUE=":1"
+fi
+
 args=(
   run
   --entrypoint "$ENTRYPOINT"
@@ -510,8 +616,6 @@ args=(
   --name "$CTN_NAME"
   -e ACCEPT_EULA=Y
   -e PRIVACY_CONSENT=Y
-  -e DISPLAY="${DISPLAY:-:0}"
-  -e QT_X11_NO_MITSHM=1
   -v /tmp/.X11-unix:/tmp/.X11-unix
   -v "$WORKSPACE_MOUNT"
 )
@@ -546,12 +650,8 @@ if is_wsl; then
   args+=(-v /usr/lib/wsl:/usr/lib/wsl)
 
   args+=(
-    -e WAYLAND_DISPLAY="${WAYLAND_DISPLAY:-wayland-0}"
-    -e XDG_RUNTIME_DIR=/mnt/wslg/runtime-dir
     -e LD_LIBRARY_PATH=/usr/lib/wsl/lib:/opt/ros/noetic/lib:/usr/local/nvidia/lib:/usr/local/nvidia/lib64
   )
-
-  [[ -n "${PULSE_SERVER:-}" ]] && args+=(-e PULSE_SERVER="$PULSE_SERVER")
 fi
 
 case "$PROXY_MODE" in
@@ -585,6 +685,7 @@ fi
 echo "Environment: $(is_wsl && echo WSL || echo Ubuntu)"
 echo "Image: $IMAGE_NAME"
 echo "Container: $CTN_NAME"
+echo "Display: $DISPLAY_VALUE"
 workspace_label="$WORKSPACE_MOUNT"
 workspace_label="$(shorten_home_path "$workspace_label")"
 echo "Workspace: $workspace_label"

@@ -49,6 +49,15 @@ bindings and rewrites container proxy values from `127.0.0.1` to
 `host.docker.internal`. It uses proxy port `7897`, GPU support, host networking,
 privileged mode, and `~:/root/host_home` by default.
 
+GUI environment defaults are selected by host type:
+
+- WSL: `DISPLAY=:0`
+- native Ubuntu: `DISPLAY=:1`
+
+The selected GUI environment is written into managed shell/environment config
+inside the container, so existing `DISPLAY` lines are updated instead of
+duplicated.
+
 When proxy is enabled, the container is configured before the interactive shell
 opens:
 
