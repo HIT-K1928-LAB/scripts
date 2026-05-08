@@ -34,6 +34,11 @@ case ":\$PATH:" in
   *":\$${ENV_VAR_NAME}:"*) ;;
   *) export PATH="\$${ENV_VAR_NAME}:\$PATH" ;;
 esac
+if [[ \$- == *i* ]]; then
+  for completion_file in "\$${ENV_VAR_NAME}"/completions/*.bash; do
+    [[ -r "\$completion_file" ]] && source "\$completion_file"
+  done
+fi
 $END_MARKER
 EOF
 
@@ -41,6 +46,8 @@ mv "$tmp_file" "$BASHRC"
 
 echo "Updated PATH config in $BASHRC:"
 echo "  $TARGET_DIR"
+echo "Bash completions are loaded from:"
+echo "  $TARGET_DIR/completions/*.bash"
 echo
 echo "Run this once in the current shell:"
 echo "  source ~/.bashrc"

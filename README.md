@@ -13,7 +13,8 @@ source ~/.bashrc
 
 The installer permanently adds the current directory to `PATH` in `~/.bashrc`.
 It updates the existing managed block when run again, so it does not duplicate
-the same `PATH` entry.
+the same `PATH` entry. It also loads Bash completions from `completions/*.bash`
+for interactive shells.
 
 ## Docker Image Runner
 
@@ -34,6 +35,13 @@ Preview the generated Docker command without running it:
 
 ```bash
 run_docker_image.sh yopo:latest yopo --dry-run
+```
+
+Press Tab after the first argument position to complete local Docker image
+names:
+
+```bash
+run_docker_image.sh yo<Tab>
 ```
 
 The runner detects WSL automatically. In WSL, it adds WSLg and `/dev/dxg`
