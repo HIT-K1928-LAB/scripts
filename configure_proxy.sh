@@ -21,6 +21,8 @@ DRY_RUN=0
 TMP_DIR=""
 BASHRC_PROXY_START="# >>> configure_proxy http env >>>"
 BASHRC_PROXY_END="# <<< configure_proxy http env <<<"
+SSH_GITHUB_START="# >>> configure_proxy github ssh >>>"
+SSH_GITHUB_END="# <<< configure_proxy github ssh <<<"
 
 usage() {
   cat <<'EOF'
@@ -327,6 +329,112 @@ ${BASHRC_PROXY_END}
 EOF
 }
 
+target_ssh_config() {
+  local user
+  user="$(target_user)"
+  printf '%s/.ssh/config\n' "$(target_home "$user")"
+}
+
+target_ssh_dir() {
+  local user
+  user="$(target_user)"
+  printf '%s/.ssh\n' "$(target_home "$user")"
+}
+
+write_github_ssh_config_block() {
+  local tmp_file="$1"
+
+  cat > "$tmp_file" <<EOF
+${SSH_GITHUB_START}
+Host github.com
+    Hostname ssh.github.com
+    Port 443
+    User git
+${SSH_GITHUB_END}
+EOF
+}
+
+filter_github_ssh_config() {
+  local input="$1"
+  local output="$2"
+  local remove_unmanaged="${3:-0}"
+
+  if [[ -f "$input" ]]; then
+    awk -v start="$SSH_GITHUB_START" \
+        -v end="$SSH_GITHUB_END" \
+        -v remove_unmanaged="$remove_unmanaged" '
+      $0 == start { skip = 1; next }
+      $0 == end { skip = 0; next }
+      skip { next }
+
+      remove_unmanaged && $0 ~ /^[[:space:]]*Host[[:space:]]+github\.com([[:space:]]*)$/ {
+        skip_github = 1
+        next
+      }
+
+      skip_github && $0 ~ /^[[:space:]]*(Host|Match)[[:space:]]+/ {
+        skip_github = 0
+      }
+
+      !skip_github { print }
+    ' "$input" > "$output"
+  else
+    : > "$output"
+  fi
+}
+
+merge_github_ssh_config() {
+  local user=""
+  local ssh_dir=""
+  local ssh_config=""
+  local filtered="${TMP_DIR}/ssh_config.filtered"
+  local github_block="${TMP_DIR}/ssh_config.github"
+  local merged="${TMP_DIR}/ssh_config.merged"
+
+  user="$(target_user)"
+  ssh_dir="$(target_ssh_dir)"
+  ssh_config="$(target_ssh_config)"
+  write_github_ssh_config_block "$github_block"
+
+  if [[ "$DRY_RUN" -eq 1 ]]; then
+    log "Would merge GitHub SSH-over-443 config into ${ssh_config}"
+    return 0
+  fi
+
+  install -d -m 0700 "$ssh_dir"
+  filter_github_ssh_config "$ssh_config" "$filtered" 1
+  cat "$filtered" "$github_block" > "$merged"
+  install -m 0644 "$merged" "$ssh_config"
+
+  if [[ "${EUID:-$(id -u)}" -eq 0 ]]; then
+    chown -R "$(target_chown_spec "$user")" "$ssh_dir"
+  fi
+}
+
+unset_github_ssh_config() {
+  local user=""
+  local ssh_dir=""
+  local ssh_config=""
+  local filtered="${TMP_DIR}/ssh_config.filtered"
+
+  user="$(target_user)"
+  ssh_dir="$(target_ssh_dir)"
+  ssh_config="$(target_ssh_config)"
+
+  if [[ "$DRY_RUN" -eq 1 ]]; then
+    log "Would remove managed GitHub SSH-over-443 config from ${ssh_config}"
+    return 0
+  fi
+
+  [[ -f "$ssh_config" ]] || return 0
+  filter_github_ssh_config "$ssh_config" "$filtered" 0
+  install -m 0644 "$filtered" "$ssh_config"
+
+  if [[ "${EUID:-$(id -u)}" -eq 0 ]]; then
+    chown -R "$(target_chown_spec "$user")" "$ssh_dir"
+  fi
+}
+
 filter_bashrc_proxy_block() {
   local input="$1"
   local output="$2"
@@ -527,6 +635,7 @@ configure_proxy() {
   if [[ "$SKIP_GIT" -eq 0 ]]; then
     if command -v git >/dev/null 2>&1; then
       configure_git_proxy
+      merge_github_ssh_config
     else
       warn "git is not installed; skipped git proxy config"
     fi
@@ -561,6 +670,7 @@ unset_proxy() {
 
   if [[ "$SKIP_GIT" -eq 0 && $(command -v git || true) ]]; then
     unset_git_proxy
+    unset_github_ssh_config
   fi
 
   if [[ "$SKIP_DOCKER" -eq 0 ]]; then
@@ -596,6 +706,7 @@ Done.
   ALL:     ${ALL_PROXY_URL}
   ~/.bashrc HTTP(S) env: enabled
   system HTTP(S) env: ${http_env_status}
+  GitHub SSH: ssh.github.com:443
 
 Open a new shell or run:
   source /etc/profile.d/proxy.sh

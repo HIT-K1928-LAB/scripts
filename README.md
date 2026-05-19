@@ -207,7 +207,9 @@ also writes managed `http_proxy`/`https_proxy` exports to the target user's
 variables in system environment files unless `--http-env` is passed, because
 apt reads those variables and some repositories fail through HTTP proxy. Apt
 config is left unchanged by default; pass `--apt` only when apt should also use
-the proxy. When it runs inside a Docker container on WSL, the default proxy becomes
+the proxy. Git is configured for system/global HTTP(S) proxy, and a managed
+`Host github.com` SSH config block is added so GitHub SSH uses
+`ssh.github.com:443`. When it runs inside a Docker container on WSL, the default proxy becomes
 `host.docker.internal:7897` so the container can reach the WSL/Docker host
 proxy.
 
