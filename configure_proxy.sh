@@ -11,6 +11,7 @@ PROXY_EXPLICIT=0
 HTTP_PROXY_URL=""
 ALL_PROXY_URL=""
 NO_PROXY_LIST="localhost,127.0.0.1,::1,0.0.0.0,192.168.0.0/16,10.0.0.0/8,172.16.0.0/12"
+CONFIGURE_HTTP_ENV=0
 SKIP_APT=0
 CONFIGURE_APT=0
 SKIP_GIT=0
@@ -36,6 +37,9 @@ Options:
       --all-proxy URL     Override all_proxy/ALL_PROXY. Default is derived
                           from --proxy as socks5h://HOST:PORT.
       --no-proxy LIST     Override no_proxy/NO_PROXY.
+      --http-env          Also export http_proxy/https_proxy environment
+                          variables. Disabled by default because apt reads
+                          them and some repositories fail through HTTP proxy.
       --apt               Configure apt proxy. By default apt is unchanged.
       --skip-apt          Do not change apt proxy settings.
       --skip-git          Do not configure system or global git proxy.
@@ -128,6 +132,10 @@ parse_args() {
         NO_PROXY_LIST="$2"
         shift 2
         ;;
+      --http-env)
+        CONFIGURE_HTTP_ENV=1
+        shift
+        ;;
       --apt)
         CONFIGURE_APT=1
         SKIP_APT=0
@@ -217,31 +225,43 @@ derive_proxy_urls() {
 
 write_profile_proxy() {
   local tmp_file="$1"
-  cat > "$tmp_file" <<EOF
+  {
+    cat <<EOF
 # Global proxy for all users. Managed by ${SCRIPT_NAME}.
-export http_proxy="${HTTP_PROXY_URL}"
-export https_proxy="${HTTP_PROXY_URL}"
-export HTTP_PROXY="${HTTP_PROXY_URL}"
-export HTTPS_PROXY="${HTTP_PROXY_URL}"
 export all_proxy="${ALL_PROXY_URL}"
 export ALL_PROXY="${ALL_PROXY_URL}"
 export no_proxy="${NO_PROXY_LIST}"
 export NO_PROXY="\$no_proxy"
 EOF
+    if [[ "$CONFIGURE_HTTP_ENV" -eq 1 ]]; then
+      cat <<EOF
+export http_proxy="${HTTP_PROXY_URL}"
+export https_proxy="${HTTP_PROXY_URL}"
+export HTTP_PROXY="${HTTP_PROXY_URL}"
+export HTTPS_PROXY="${HTTP_PROXY_URL}"
+EOF
+    fi
+  } > "$tmp_file"
 }
 
 write_environment_proxy() {
   local tmp_file="$1"
-  cat > "$tmp_file" <<EOF
-http_proxy=${HTTP_PROXY_URL}
-https_proxy=${HTTP_PROXY_URL}
-HTTP_PROXY=${HTTP_PROXY_URL}
-HTTPS_PROXY=${HTTP_PROXY_URL}
+  {
+    cat <<EOF
 all_proxy=${ALL_PROXY_URL}
 ALL_PROXY=${ALL_PROXY_URL}
 no_proxy=${NO_PROXY_LIST}
 NO_PROXY=${NO_PROXY_LIST}
 EOF
+    if [[ "$CONFIGURE_HTTP_ENV" -eq 1 ]]; then
+      cat <<EOF
+http_proxy=${HTTP_PROXY_URL}
+https_proxy=${HTTP_PROXY_URL}
+HTTP_PROXY=${HTTP_PROXY_URL}
+HTTPS_PROXY=${HTTP_PROXY_URL}
+EOF
+    fi
+  } > "$tmp_file"
 }
 
 filter_environment_proxy() {
@@ -429,6 +449,8 @@ unset_proxy() {
 }
 
 print_summary() {
+  local http_env_status="disabled by default"
+
   if [[ "$UNSET_PROXY" -eq 1 ]]; then
     cat <<'EOF'
 
@@ -438,17 +460,21 @@ EOF
     return 0
   fi
 
+  if [[ "$CONFIGURE_HTTP_ENV" -eq 1 ]]; then
+    http_env_status="enabled"
+  fi
+
   cat <<EOF
 
 Done.
-  HTTP(S): ${HTTP_PROXY_URL}
   ALL:     ${ALL_PROXY_URL}
+  HTTP(S) env: ${http_env_status}
 
 Open a new shell or run:
   source /etc/profile.d/proxy.sh
 
 Quick check:
-  echo \$http_proxy
+  echo \$all_proxy
   curl -I https://www.google.com
 EOF
 }
