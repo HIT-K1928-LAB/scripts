@@ -36,7 +36,7 @@ Options:
                           from --proxy as socks5h://HOST:PORT.
       --no-proxy LIST     Override no_proxy/NO_PROXY.
       --skip-apt          Do not configure apt proxy.
-      --skip-git          Do not configure system git proxy.
+      --skip-git          Do not configure system or global git proxy.
       --skip-docker       Do not configure Docker systemd proxy.
       --unset             Remove proxy settings managed by this script.
       --dry-run           Print planned changes without changing the system.
@@ -308,6 +308,52 @@ EOF
   fi
 }
 
+git_global_user() {
+  if [[ "${EUID:-$(id -u)}" -eq 0 && -n "${SUDO_USER:-}" && "${SUDO_USER}" != "root" ]]; then
+    printf '%s\n' "$SUDO_USER"
+  fi
+}
+
+run_git_global() {
+  local user
+  user="$(git_global_user)"
+
+  if [[ "$DRY_RUN" -eq 1 ]]; then
+    printf '[dry-run]'
+    if [[ -n "$user" ]]; then
+      printf ' sudo -H -u %q' "$user"
+    fi
+    printf ' git config --global'
+    printf ' %q' "$@"
+    printf '\n'
+    return 0
+  fi
+
+  if [[ -n "$user" ]]; then
+    sudo -H -u "$user" git config --global "$@"
+  else
+    git config --global "$@"
+  fi
+}
+
+run_optional_git_global() {
+  run_git_global "$@" || true
+}
+
+configure_git_proxy() {
+  run_root git config --system --replace-all http.proxy "$HTTP_PROXY_URL"
+  run_root git config --system --replace-all https.proxy "$HTTP_PROXY_URL"
+  run_git_global --replace-all http.proxy "$HTTP_PROXY_URL"
+  run_git_global --replace-all https.proxy "$HTTP_PROXY_URL"
+}
+
+unset_git_proxy() {
+  run_optional_root git config --system --unset-all http.proxy
+  run_optional_root git config --system --unset-all https.proxy
+  run_optional_git_global --unset-all http.proxy
+  run_optional_git_global --unset-all https.proxy
+}
+
 configure_proxy() {
   local profile_tmp="${TMP_DIR}/proxy.sh"
 
@@ -328,8 +374,7 @@ configure_proxy() {
 
   if [[ "$SKIP_GIT" -eq 0 ]]; then
     if command -v git >/dev/null 2>&1; then
-      run_root git config --system http.proxy "$HTTP_PROXY_URL"
-      run_root git config --system https.proxy "$HTTP_PROXY_URL"
+      configure_git_proxy
     else
       warn "git is not installed; skipped git proxy config"
     fi
@@ -362,8 +407,7 @@ unset_proxy() {
   fi
 
   if [[ "$SKIP_GIT" -eq 0 && $(command -v git || true) ]]; then
-    run_optional_root git config --system --unset http.proxy
-    run_optional_root git config --system --unset https.proxy
+    unset_git_proxy
   fi
 
   if [[ "$SKIP_DOCKER" -eq 0 ]]; then
