@@ -26,6 +26,8 @@ CUSTOM_UA=0
 SKIP_SUBSCRIPTION=0
 SKIP_SYSTEM_PROXY=0
 SKIP_DOCKER_PROXY=0
+UNINSTALL=0
+KEEP_CONFIG=0
 DRY_RUN=0
 TMP_DIR=""
 MIHOMO_DEB_DIR=""
@@ -37,6 +39,7 @@ usage() {
 Usage:
   install_mihomo_proxy.sh --sub-url URL [options]
   MIHOMO_SUB_URL=URL install_mihomo_proxy.sh [options]
+  install_mihomo_proxy.sh --uninstall [options]
 
 Options:
       --sub-url URL          Subscription URL for /etc/mihomo/config.yaml.
@@ -57,6 +60,9 @@ Options:
       --skip-system-proxy    Do not write /etc/profile.d, /etc/environment,
                              apt, git, or docker proxy settings.
       --skip-docker-proxy    Do not write/restart Docker proxy settings.
+      --uninstall            Stop and uninstall mihomo, remove config/log files,
+                             and restore proxy settings written by this script.
+      --keep-config          Keep /etc/mihomo and /var/log/mihomo on uninstall.
       --dry-run              Print planned actions without changing the system.
   -h, --help                 Show this help.
 
@@ -189,6 +195,14 @@ parse_args() {
         SKIP_DOCKER_PROXY=1
         shift
         ;;
+      --uninstall)
+        UNINSTALL=1
+        shift
+        ;;
+      --keep-config)
+        KEEP_CONFIG=1
+        shift
+        ;;
       --dry-run)
         DRY_RUN=1
         shift
@@ -206,6 +220,10 @@ parse_args() {
   is_port "$HTTP_PORT" || die "invalid --http-port: $HTTP_PORT"
   is_port "$SOCKS_PORT" || die "invalid --socks-port: $SOCKS_PORT"
   [[ "$ALLOW_LAN" == "true" || "$ALLOW_LAN" == "false" ]] || die "--allow-lan must be true or false"
+
+  if [[ "$UNINSTALL" -eq 1 ]]; then
+    return 0
+  fi
 
   if [[ -n "$SUB_URL_PATH" ]]; then
     [[ -r "$SUB_URL_PATH" ]] || die "subscription URL file is not readable: $SUB_URL_PATH"
@@ -835,6 +853,27 @@ merge_environment_proxy() {
   run_root install -m 0644 "$merged" /etc/environment
 }
 
+remove_environment_proxy() {
+  local tmp_dir="$1"
+  local filtered="${tmp_dir}/environment.restored"
+
+  if [[ "$DRY_RUN" -eq 1 ]]; then
+    log "Would remove proxy variables from /etc/environment"
+    return 0
+  fi
+
+  if [[ ! -f /etc/environment ]]; then
+    return 0
+  fi
+
+  # shellcheck disable=SC2016
+  run_root awk -F= '
+    $1 ~ /^(http_proxy|https_proxy|HTTP_PROXY|HTTPS_PROXY|all_proxy|ALL_PROXY|no_proxy|NO_PROXY)$/ { next }
+    { print }
+  ' /etc/environment > "$filtered"
+  run_root install -m 0644 "$filtered" /etc/environment
+}
+
 configure_system_proxy() {
   local tmp_dir="$1"
   local profile_tmp="${tmp_dir}/proxy.sh"
@@ -885,6 +924,36 @@ EOF
   fi
 }
 
+remove_system_proxy() {
+  local tmp_dir="$1"
+
+  log "Restoring system proxy environment"
+  run_root rm -f /etc/profile.d/proxy.sh
+  remove_environment_proxy "$tmp_dir"
+  run_root rm -f /etc/apt/apt.conf.d/95proxies
+
+  if command -v git >/dev/null 2>&1; then
+    run_root git config --system --unset http.proxy || true
+    run_root git config --system --unset https.proxy || true
+  fi
+
+  if [[ "$SKIP_DOCKER_PROXY" -eq 1 ]]; then
+    return 0
+  fi
+
+  if [[ -f /etc/systemd/system/docker.service.d/http-proxy.conf ]]; then
+    log "Removing Docker systemd proxy"
+    run_root rm -f /etc/systemd/system/docker.service.d/http-proxy.conf
+    run_root rmdir --ignore-fail-on-non-empty /etc/systemd/system/docker.service.d || true
+    if command -v systemctl >/dev/null 2>&1; then
+      run_root systemctl daemon-reload
+      if systemctl is-active docker >/dev/null 2>&1; then
+        run_root systemctl restart docker
+      fi
+    fi
+  fi
+}
+
 restart_mihomo() {
   if systemd_unit_exists mihomo.service; then
     log "Enabling and restarting mihomo.service"
@@ -893,6 +962,39 @@ restart_mihomo() {
     run_root systemctl is-enabled mihomo
   else
     warn "mihomo.service was not found or systemd is unavailable; start mihomo manually"
+  fi
+}
+
+uninstall_mihomo() {
+  local tmp_dir="$1"
+
+  if [[ "${EUID:-$(id -u)}" -ne 0 ]]; then
+    require_cmd sudo
+  fi
+
+  remove_system_proxy "$tmp_dir"
+
+  if systemd_unit_exists mihomo.service; then
+    log "Stopping and disabling mihomo.service"
+    run_root systemctl stop mihomo || true
+    run_root systemctl disable mihomo || true
+  fi
+
+  if command -v apt-get >/dev/null 2>&1 && command -v dpkg >/dev/null 2>&1 && dpkg -s mihomo >/dev/null 2>&1; then
+    log "Purging mihomo package"
+    run_root apt-get purge -y mihomo
+    run_root apt-get autoremove -y
+  elif command -v mihomo >/dev/null 2>&1; then
+    warn "mihomo command exists, but no apt package named mihomo was found; leaving binary in place"
+  else
+    log "mihomo package is not installed"
+  fi
+
+  if [[ "$KEEP_CONFIG" -eq 1 ]]; then
+    log "Keeping ${MIHOMO_CONFIG_DIR} and ${MIHOMO_LOG_DIR}"
+  else
+    log "Removing mihomo config and log directories"
+    run_root rm -rf "$MIHOMO_CONFIG_DIR" "$MIHOMO_LOG_DIR"
   fi
 }
 
@@ -921,12 +1023,32 @@ Quick checks:
 EOF
 }
 
+print_uninstall_summary() {
+  cat <<'EOF'
+
+Done.
+  Removed system proxy settings written by install_mihomo_proxy.sh.
+  Stopped/disabled mihomo.service when it existed.
+  Purged the mihomo apt package when it was installed by apt.
+
+Open a new shell, or clear proxy variables in the current shell:
+  unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY all_proxy ALL_PROXY no_proxy NO_PROXY
+EOF
+}
+
 main() {
   parse_args "$@"
-  install_prerequisites
 
   TMP_DIR="$(mktemp -d)"
   trap '[[ -n "${TMP_DIR:-}" ]] && rm -rf -- "$TMP_DIR"; [[ -n "${MIHOMO_DEB_DIR:-}" ]] && rm -rf -- "$MIHOMO_DEB_DIR"' EXIT
+
+  if [[ "$UNINSTALL" -eq 1 ]]; then
+    uninstall_mihomo "$TMP_DIR"
+    print_uninstall_summary
+    return 0
+  fi
+
+  install_prerequisites
 
   log "Creating mihomo directories"
   run_root mkdir -p "$MIHOMO_CONFIG_DIR" "$MIHOMO_UI_DIR" "$MIHOMO_LOG_DIR"

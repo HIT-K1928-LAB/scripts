@@ -151,6 +151,24 @@ Preview the installation without changing the system:
 install_mihomo_proxy.sh --sub-url-file ~/.config/mihomo/sub_url --dry-run
 ```
 
+Uninstall mihomo and restore the proxy settings written by the installer:
+
+```bash
+install_mihomo_proxy.sh --uninstall
+```
+
+Uninstall mode stops and disables `mihomo.service`, purges the apt package when
+it is installed, removes `/etc/mihomo` and `/var/log/mihomo`, removes
+`/etc/profile.d/proxy.sh`, clears proxy variables from `/etc/environment`,
+removes `/etc/apt/apt.conf.d/95proxies`, unsets system git proxy values, and
+removes the Docker systemd proxy drop-in. Use `--keep-config` if you want to
+keep `/etc/mihomo` and `/var/log/mihomo`. Open a new shell after uninstalling,
+or clear proxy variables in the current shell:
+
+```bash
+unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY all_proxy ALL_PROXY no_proxy NO_PROXY
+```
+
 Useful options:
 
 - `--download-proxy URL` uses an existing proxy while downloading releases, the
@@ -159,6 +177,7 @@ Useful options:
 - `--skip-subscription` keeps the current `/etc/mihomo/config.yaml`.
 - `--skip-system-proxy` skips shell, apt, git, and Docker proxy settings.
 - `--skip-docker-proxy` skips only the Docker systemd proxy drop-in.
+- `--keep-config` keeps mihomo config and logs during `--uninstall`.
 
 ## Mihomo Config Refresher
 
